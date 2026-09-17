@@ -1,5 +1,8 @@
+import base64
+import io
 import os
 import queue
+import tempfile
 import threading
 import time
 from flask import Flask, jsonify, request
@@ -9,33 +12,45 @@ from gradio_client import Client, handle_file
 app = Flask(__name__)
 CORS(app)
 
-# -------------------------------------------------------------
-# ১. Gradio API Token Configuration
-# -------------------------------------------------------------
 HF_TOKEN = os.getenv("HF_TOKEN", "")
-
-# -------------------------------------------------------------
-# ২. Request Queue এবং Task Status Management
-# -------------------------------------------------------------
 request_queue = queue.Queue()
 task_status = {}
 
 
+def save_base64_to_temp_file(base64_string):
+    """Base64 ইমেজকে একটি টেম্পোরারি ফাইলে সেভ করে তার পাথ রিটার্ন করে"""
+    try:
+        if "," in base64_string:
+            base64_string = base64_string.split(",")[1]
+
+        image_bytes = base64.b64decode(base64_string)
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        temp_file.write(image_bytes)
+        temp_file.close()
+        return temp_file.name
+    except Exception as e:
+        print(f"Error decoding base64 image: {e}")
+        return None
+
+
 def process_3d_conversion(image_data, task_id):
-    """Gradio Client দিয়ে Hunyuan3D-2 মডেল জেনারেট করার প্রসেস"""
+    """Gradio Client দিয়ে Hunyuan3D-2 API কল"""
+    temp_file_path = None
     try:
         space_id = "tencent/Hunyuan3D-2"
-
         client = Client(space_id, hf_token=HF_TOKEN if HF_TOKEN else None)
 
-        # ইমেজ ইনপুট হ্যান্ডলিং
-        image_input = (
-            handle_file(image_data)
-            if isinstance(image_data, str) and os.path.exists(image_data)
-            else image_data
-        )
+        # Base64 ইমেজ হলে ফাইল হিসেবে সেভ করা
+        if isinstance(image_data, str) and (
+            image_data.startswith("data:image") or len(image_data) > 500
+        ):
+            temp_file_path = save_base64_to_temp_file(image_data)
+            image_input = handle_file(temp_file_path)
+        elif isinstance(image_data, str) and os.path.exists(image_data):
+            image_input = handle_file(image_data)
+        else:
+            image_input = image_data
 
-        # /shape_generation API কল
         result = client.predict(
             caption=None,
             image=image_input,
@@ -53,15 +68,21 @@ def process_3d_conversion(image_data, task_id):
             api_name="/shape_generation",
         )
 
+        # কাজ শেষে টেম্পোরারি ফাইল ডিলিট করা
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
         return {"success": True, "model_url": result}
 
     except Exception as e:
         print(f"Error during Gradio API call: {e}")
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
         return {"success": False, "error": str(e)}
 
 
 def worker_thread():
-    """লাইনের টাস্কগুলো ব্যাকগ্রাউন্ডে একটি একটি করে প্রসেস করবে"""
+    """ব্যাকগ্রাউন্ড টাস্ক এক্সিকিউটর"""
     while True:
         task_id, image_data = request_queue.get()
         task_status[task_id]["status"] = "processing"
@@ -81,9 +102,6 @@ def worker_thread():
 threading.Thread(target=worker_thread, daemon=True).start()
 
 
-# -------------------------------------------------------------
-# ৩. API Endpoints
-# -------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "Server is running successfully!"})
@@ -99,7 +117,7 @@ def generate_3d():
 
     task_id = f"task_{int(time.time() * 1000)}"
     q_size = request_queue.qsize()
-    estimated_wait_time = (q_size + 1) * 120
+    estimated_wait_time = (q_size + 1) * 180
 
     task_status[task_id] = {
         "status": "pending",
@@ -112,7 +130,7 @@ def generate_3d():
     return jsonify(
         {
             "task_id": task_id,
-            "message": f"আপনি লাইনে আছেন ({q_size + 1} নম্বর)। অনুগ্রহ করে অপেক্ষা করুন।",
+            "message": f"আপনার রিকোয়েস্ট লাইনে আছে। অনুগ্রহ করে অপেক্ষা করুন।",
             "wait_time": estimated_wait_time,
         }
     )
