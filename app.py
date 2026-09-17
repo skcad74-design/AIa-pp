@@ -13,11 +13,10 @@ from gradio_client import Client, handle_file
 
 
 # =========================================================
-# APP
+# FLASK APP
 # =========================================================
 
 app = Flask(__name__)
-
 
 CORS(
     app,
@@ -31,47 +30,20 @@ CORS(
 
 
 # =========================================================
-# CONFIG
+# CONFIGURATION
 # =========================================================
 
-HF_TOKEN = os.getenv(
-    "HF_TOKEN",
-    ""
-).strip()
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 
+HF_SPACE = "tencent/Hunyuan3D-2"
 
-HF_SPACE = (
-    "tencent/Hunyuan3D-2"
-)
+BASE_DIR = Path(__file__).resolve().parent
 
+MODEL_DIR = BASE_DIR / "generated_models"
+UPLOAD_DIR = BASE_DIR / "uploads"
 
-BASE_DIR = Path(
-    __file__
-).resolve().parent
-
-
-MODEL_DIR = (
-    BASE_DIR /
-    "generated_models"
-)
-
-
-UPLOAD_DIR = (
-    BASE_DIR /
-    "uploads"
-)
-
-
-MODEL_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
-
-UPLOAD_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # =========================================================
@@ -80,16 +52,14 @@ UPLOAD_DIR.mkdir(
 
 request_queue = queue.Queue()
 
-
 MAX_QUEUE_SIZE = 10
 
 
 # =========================================================
-# TASK DATABASE
+# TASK STORAGE
 # =========================================================
 
 task_status = {}
-
 
 task_lock = threading.Lock()
 
@@ -98,8 +68,7 @@ task_lock = threading.Lock()
 # WORKER STATE
 # =========================================================
 
-worker_started = False
-
+worker_thread_instance = None
 
 worker_lock = threading.Lock()
 
@@ -108,122 +77,73 @@ worker_lock = threading.Lock()
 # TASK UPDATE
 # =========================================================
 
-def update_task(
-    task_id,
-    **values
-):
+def update_task(task_id, **values):
+    """Safely update task information."""
 
     with task_lock:
-
         if task_id in task_status:
-
-            task_status[
-                task_id
-            ].update(
-                values
-            )
+            task_status[task_id].update(values)
 
 
 # =========================================================
 # GET TASK
 # =========================================================
 
-def get_task(
-    task_id
-):
+def get_task(task_id):
+    """Safely get task information."""
 
     with task_lock:
-
-        data =
-            task_status.get(
-                task_id
-            )
+        data = task_status.get(task_id)
 
         if data is None:
-
             return None
 
-        return dict(
-            data
-        )
+        return dict(data)
 
 
 # =========================================================
-# SAVE IMAGE
+# SAVE BASE64 IMAGE
 # =========================================================
 
-def save_base64_image(
-    base64_string,
-    task_id
-):
+def save_base64_image(base64_string, task_id):
+    """Save base64 image to temporary file."""
 
     if not base64_string:
-
-        raise ValueError(
-            "No image data received."
-        )
-
+        raise ValueError("No image data received.")
 
     try:
 
+        # Remove data:image/...;base64, prefix
         if "," in base64_string:
+            base64_string = base64_string.split(",", 1)[1]
 
-            base64_string = \
-                base64_string.split(
-                    ",",
-                    1
-                )[1]
+        image_bytes = base64.b64decode(
+            base64_string,
+            validate=True
+        )
 
-
-        image_bytes = \
-            base64.b64decode(
-                base64_string,
-                validate=True
-            )
-
-
-        if len(image_bytes) > (
-            15 * 1024 * 1024
-        ):
-
+        # Maximum 15 MB
+        if len(image_bytes) > 15 * 1024 * 1024:
             raise ValueError(
                 "Image is too large. Maximum size is 15 MB."
             )
 
+        file_path = UPLOAD_DIR / f"{task_id}.png"
 
-        file_path = (
-            UPLOAD_DIR /
-            f"{task_id}.png"
-        )
-
-
-        with open(
-            file_path,
-            "wb"
-        ) as f:
-
-            f.write(
-                image_bytes
-            )
-
+        with open(file_path, "wb") as file:
+            file.write(image_bytes)
 
         print(
-            "IMAGE SAVED:",
-            file_path,
+            f"IMAGE SAVED: {file_path}",
             flush=True
         )
 
+        return str(file_path)
 
-        return str(
-            file_path
-        )
-
-
-    except Exception as e:
+    except Exception as error:
 
         print(
-            "IMAGE SAVE ERROR:",
-            repr(e),
+            f"IMAGE SAVE ERROR: {error}",
             flush=True
         )
 
@@ -231,141 +151,96 @@ def save_base64_image(
 
 
 # =========================================================
-# FIND GENERATED FILE
+# FIND FILE IN HUGGING FACE RESULT
 # =========================================================
 
-def find_file_in_result(
-    result
-):
+def find_file_in_result(result):
+    """
+    Search recursively for a generated file.
+
+    Supports:
+    - string
+    - pathlib.Path
+    - dict
+    - list
+    - tuple
+    """
 
     if result is None:
+        return None
+
+    # -----------------------------------------
+    # STRING / PATH
+    # -----------------------------------------
+
+    if isinstance(result, (str, Path)):
+
+        path = Path(result)
+
+        if path.exists() and path.is_file():
+            return str(path)
 
         return None
 
+    # -----------------------------------------
+    # DICTIONARY
+    # -----------------------------------------
 
-    # String / Path
-    if isinstance(
-        result,
-        (str, Path)
-    ):
+    if isinstance(result, dict):
 
-        path = Path(
-            result
-        )
-
-
-        if (
-            path.exists()
-            and
-            path.is_file()
-        ):
-
-            return str(
-                path
-            )
-
-
-        return None
-
-
-    # Dictionary
-    if isinstance(
-        result,
-        dict
-    ):
-
-        possible_path = \
-            result.get(
-                "path"
-            )
-
+        possible_path = result.get("path")
 
         if possible_path:
 
-            path = Path(
-                possible_path
-            )
+            path = Path(possible_path)
 
-
-            if (
-                path.exists()
-                and
-                path.is_file()
-            ):
-
-                return str(
-                    path
-                )
-
+            if path.exists() and path.is_file():
+                return str(path)
 
         for value in result.values():
 
-            found = \
-                find_file_in_result(
-                    value
-                )
-
+            found = find_file_in_result(value)
 
             if found:
-
                 return found
-
 
         return None
 
+    # -----------------------------------------
+    # LIST / TUPLE
+    # -----------------------------------------
 
-    # List / tuple
-    if isinstance(
-        result,
-        (list, tuple)
-    ):
+    if isinstance(result, (list, tuple)):
 
         for item in result:
 
-            found = \
-                find_file_in_result(
-                    item
-                )
-
+            found = find_file_in_result(item)
 
             if found:
-
                 return found
 
-
         return None
-
 
     return None
 
 
 # =========================================================
-# COPY MODEL
+# COPY GENERATED MODEL
 # =========================================================
 
-def copy_generated_file(
-    source_file,
-    task_id
-):
+def copy_generated_file(source_file, task_id):
+    """Copy generated model to public model directory."""
 
-    source = Path(
-        source_file
-    )
-
+    source = Path(source_file)
 
     if not source.exists():
-
         raise FileNotFoundError(
-            "Generated model file does not exist: "
-            + str(source)
+            f"Generated model does not exist: {source}"
         )
 
+    extension = source.suffix.lower()
 
-    extension = \
-        source.suffix.lower()
-
-
-    allowed = [
+    allowed_extensions = [
         ".glb",
         ".obj",
         ".ply",
@@ -373,57 +248,38 @@ def copy_generated_file(
         ".fbx"
     ]
 
-
-    if extension not in allowed:
-
+    if extension not in allowed_extensions:
         extension = ".glb"
 
+    filename = f"{task_id}{extension}"
 
-    filename = (
-        task_id +
-        extension
-    )
-
-
-    destination = (
-        MODEL_DIR /
-        filename
-    )
-
+    destination = MODEL_DIR / filename
 
     shutil.copy2(
         source,
         destination
     )
 
-
     print(
-        "MODEL COPIED:",
-        destination,
+        f"MODEL COPIED: {destination}",
         flush=True
     )
-
 
     return filename
 
 
 # =========================================================
-# HUNYUAN 3D
+# HUNYUAN 3D PROCESS
 # =========================================================
 
-def process_3d_conversion(
-    image_file,
-    task_id
-):
+def process_3d_conversion(image_file, task_id):
 
     client = None
-
 
     try:
 
         print(
-            "\n"
-            + "=" * 60,
+            "\n" + "=" * 60,
             flush=True
         )
 
@@ -433,14 +289,12 @@ def process_3d_conversion(
         )
 
         print(
-            "TASK:",
-            task_id,
+            f"TASK: {task_id}",
             flush=True
         )
 
         print(
-            "IMAGE:",
-            image_file,
+            f"IMAGE: {image_file}",
             flush=True
         )
 
@@ -449,10 +303,9 @@ def process_3d_conversion(
             flush=True
         )
 
-
-        # ---------------------------------------------
+        # -----------------------------------------
         # PROCESSING
-        # ---------------------------------------------
+        # -----------------------------------------
 
         update_task(
             task_id,
@@ -460,59 +313,52 @@ def process_3d_conversion(
             message="Connecting to Hunyuan3D..."
         )
 
-
-        # ---------------------------------------------
-        # CONNECT
-        # ---------------------------------------------
+        # -----------------------------------------
+        # HUGGING FACE CLIENT
+        # -----------------------------------------
 
         print(
-            "CONNECTING TO:",
-            HF_SPACE,
+            f"CONNECTING TO: {HF_SPACE}",
             flush=True
         )
 
-
         client_kwargs = {}
 
-
         if HF_TOKEN:
-
-            client_kwargs[
-                "token"
-            ] = HF_TOKEN
-
+            client_kwargs["token"] = HF_TOKEN
 
         client = Client(
             HF_SPACE,
             **client_kwargs
         )
 
-
         print(
             "HUGGING FACE CONNECTED",
             flush=True
         )
 
-
         update_task(
             task_id,
             status="processing",
-            message="Connected to Hunyuan3D. Uploading image..."
+            message="Connected to Hunyuan3D. Preparing image..."
         )
 
-
-        # ---------------------------------------------
-        # IMAGE
-        # ---------------------------------------------
+        # -----------------------------------------
+        # PREPARE IMAGE
+        # -----------------------------------------
 
         image_input = handle_file(
             image_file
         )
 
+        print(
+            "IMAGE PREPARED",
+            flush=True
+        )
 
-        # ---------------------------------------------
+        # -----------------------------------------
         # GENERATION
-        # ---------------------------------------------
+        # -----------------------------------------
 
         update_task(
             task_id,
@@ -520,66 +366,53 @@ def process_3d_conversion(
             message="3D model generation started..."
         )
 
-
         print(
             "CALLING /shape_generation",
             flush=True
         )
 
-
         generation_started = time.time()
-
 
         result = client.predict(
 
-            None,
+            None,                  # caption
 
-            image_input,
+            image_input,           # image
 
-            None,
+            None,                  # mv_image_front
 
-            None,
+            None,                  # mv_image_back
 
-            None,
+            None,                  # mv_image_left
 
-            None,
+            None,                  # mv_image_right
 
-            30,
+            30,                    # steps
 
-            5.0,
+            5.0,                   # guidance_scale
 
-            1234,
+            1234,                  # seed
 
-            256,
+            256,                   # octree_resolution
 
-            True,
+            True,                  # check_box_rembg
 
-            8000,
+            8000,                  # num_chunks
 
-            True,
+            True,                  # randomize_seed
 
             api_name="/shape_generation"
-
         )
-
 
         generation_time = (
-            time.time()
-            -
-            generation_started
+            time.time() - generation_started
         )
-
 
         print(
-            "GENERATION FINISHED:",
-            round(
-                generation_time,
-                2
-            ),
-            "seconds",
+            f"GENERATION FINISHED: "
+            f"{round(generation_time, 2)} seconds",
             flush=True
         )
-
 
         print(
             "RAW HUGGING FACE RESULT:",
@@ -587,63 +420,48 @@ def process_3d_conversion(
             flush=True
         )
 
+        # -----------------------------------------
+        # FIND GENERATED FILE
+        # -----------------------------------------
 
-        # ---------------------------------------------
-        # FIND MODEL
-        # ---------------------------------------------
-
-        generated_file = \
-            find_file_in_result(
-                result
-            )
-
+        generated_file = find_file_in_result(
+            result
+        )
 
         if not generated_file:
 
             raise RuntimeError(
-                "Hunyuan3D completed, "
-                "but no generated model file was returned.\n"
-                +
-                repr(result)
+                "Hunyuan3D completed, but no "
+                "generated model file was returned. "
+                f"Raw result: {repr(result)}"
             )
 
-
         print(
-            "GENERATED FILE:",
-            generated_file,
+            f"GENERATED FILE: {generated_file}",
             flush=True
         )
 
+        # -----------------------------------------
+        # COPY MODEL
+        # -----------------------------------------
 
-        # ---------------------------------------------
-        # COPY
-        # ---------------------------------------------
-
-        filename = \
-            copy_generated_file(
-                generated_file,
-                task_id
-            )
-
-
-        download_url = (
-            "/download/" +
-            filename
+        filename = copy_generated_file(
+            generated_file,
+            task_id
         )
 
+        download_url = f"/download/{filename}"
 
-        # ---------------------------------------------
+        # -----------------------------------------
         # COMPLETE
-        # ---------------------------------------------
+        # -----------------------------------------
 
         update_task(
             task_id,
 
             status="completed",
 
-            message=(
-                "3D model successfully generated!"
-            ),
+            message="3D model successfully generated!",
 
             result=download_url,
 
@@ -655,22 +473,17 @@ def process_3d_conversion(
             )
         )
 
-
         print(
-            "TASK COMPLETED:",
-            task_id,
+            f"TASK COMPLETED: {task_id}",
             flush=True
         )
 
+    except Exception as error:
 
-    except Exception as e:
-
-        error_message = str(e)
-
+        error_message = str(error)
 
         print(
-            "\n"
-            + "=" * 60,
+            "\n" + "=" * 60,
             flush=True
         )
 
@@ -689,25 +502,21 @@ def process_3d_conversion(
             flush=True
         )
 
-
         update_task(
             task_id,
 
             status="failed",
 
-            message=(
-                "3D model generation failed."
-            ),
+            message="3D model generation failed.",
 
             error=error_message
         )
 
-
     finally:
 
-        # ---------------------------------------------
-        # DELETE UPLOAD
-        # ---------------------------------------------
+        # -----------------------------------------
+        # DELETE TEMPORARY IMAGE
+        # -----------------------------------------
 
         try:
 
@@ -717,26 +526,20 @@ def process_3d_conversion(
                     image_file
                 )
 
-
                 if image_path.exists():
 
                     image_path.unlink()
 
-
                     print(
-                        "TEMP IMAGE DELETED:",
-                        image_path,
+                        f"TEMP IMAGE DELETED: {image_path}",
                         flush=True
                     )
-
 
         except Exception as cleanup_error:
 
             print(
-                "UPLOAD CLEANUP ERROR:",
-                repr(
-                    cleanup_error
-                ),
+                f"UPLOAD CLEANUP ERROR: "
+                f"{cleanup_error}",
                 flush=True
             )
 
@@ -745,16 +548,15 @@ def process_3d_conversion(
 # WORKER
 # =========================================================
 
-def worker_thread():
+def worker_function():
 
     print(
-        "\n"
-        + "=" * 60,
+        "\n" + "=" * 60,
         flush=True
     )
 
     print(
-        "3D WORKER THREAD STARTED",
+        "INSA3D 3D WORKER STARTED",
         flush=True
     )
 
@@ -763,106 +565,87 @@ def worker_thread():
         flush=True
     )
 
-
     while True:
 
         task = None
 
-
         try:
 
-            # -----------------------------------------
+            # -------------------------------------
             # WAIT FOR TASK
-            # -----------------------------------------
+            # -------------------------------------
 
             task = request_queue.get(
                 block=True
             )
 
-
             print(
-                "\nWORKER RECEIVED TASK:",
-                task,
+                f"WORKER RECEIVED TASK: {task}",
                 flush=True
             )
 
-
             task_id, image_file = task
 
-
-            # -----------------------------------------
-            # UPDATE
-            # -----------------------------------------
+            # -------------------------------------
+            # PROCESSING
+            # -------------------------------------
 
             update_task(
                 task_id,
 
                 status="processing",
 
-                message=(
-                    "Worker started processing..."
-                )
+                message="Worker started processing..."
             )
 
-
             print(
-                "PROCESSING TASK:",
-                task_id,
+                f"PROCESSING TASK: {task_id}",
                 flush=True
             )
 
-
-            # -----------------------------------------
+            # -------------------------------------
             # GENERATE
-            # -----------------------------------------
+            # -------------------------------------
 
             process_3d_conversion(
                 image_file,
                 task_id
             )
 
-
-        except Exception as e:
+        except Exception as error:
 
             print(
-                "WORKER UNEXPECTED ERROR:",
-                repr(e),
+                f"WORKER UNEXPECTED ERROR: {error}",
                 flush=True
             )
 
-
-            if task:
+            if task is not None:
 
                 try:
 
                     task_id = task[0]
-
 
                     update_task(
                         task_id,
 
                         status="failed",
 
-                        error=str(e)
+                        message="Worker failed.",
+
+                        error=str(error)
                     )
 
                 except Exception:
-
                     pass
-
 
         finally:
 
             if task is not None:
 
                 try:
-
                     request_queue.task_done()
-
                 except Exception:
-
                     pass
-
 
             print(
                 "WORKER LOOP READY",
@@ -876,32 +659,25 @@ def worker_thread():
 
 def start_worker():
 
-    global worker_started
-
+    global worker_thread_instance
 
     with worker_lock:
 
-        if worker_started:
-
+        # Don't start twice
+        if (
+            worker_thread_instance is not None
+            and
+            worker_thread_instance.is_alive()
+        ):
             return
 
-
-        worker_started = True
-
-
-        worker = threading.Thread(
-
-            target=worker_thread,
-
+        worker_thread_instance = threading.Thread(
+            target=worker_function,
             daemon=True,
-
             name="INSA3D-3D-WORKER"
-
         )
 
-
-        worker.start()
-
+        worker_thread_instance.start()
 
         print(
             "WORKER THREAD CREATED",
@@ -909,7 +685,10 @@ def start_worker():
         )
 
 
-# Start worker
+# =========================================================
+# START WORKER NOW
+# =========================================================
+
 start_worker()
 
 
@@ -923,22 +702,23 @@ start_worker()
 )
 def home():
 
+    worker_alive = (
+        worker_thread_instance is not None
+        and
+        worker_thread_instance.is_alive()
+    )
+
     return jsonify({
 
-        "status":
-            "Server is running successfully!",
+        "status": "Server is running successfully!",
 
-        "service":
-            "INSA3D 3D Generator",
+        "service": "INSA3D 3D Generator",
 
-        "engine":
-            "Tencent Hunyuan3D-2",
+        "engine": "Tencent Hunyuan3D-2",
 
-        "queue":
-            request_queue.qsize(),
+        "queue": request_queue.qsize(),
 
-        "worker_alive":
-            worker_started
+        "worker_alive": worker_alive
 
     })
 
@@ -953,25 +733,27 @@ def home():
 )
 def health():
 
+    worker_alive = (
+        worker_thread_instance is not None
+        and
+        worker_thread_instance.is_alive()
+    )
+
     return jsonify({
 
-        "status":
-            "ok",
+        "status": "ok",
 
-        "worker_alive":
-            worker_started,
+        "worker_alive": worker_alive,
 
-        "queue_size":
-            request_queue.qsize(),
+        "queue_size": request_queue.qsize(),
 
-        "tasks":
-            len(task_status)
+        "tasks": len(task_status)
 
     })
 
 
 # =========================================================
-# GENERATE
+# GENERATE 3D
 # =========================================================
 
 @app.route(
@@ -982,58 +764,58 @@ def generate_3d():
 
     try:
 
-        # ---------------------------------------------
+        # -----------------------------------------
         # QUEUE LIMIT
-        # ---------------------------------------------
+        # -----------------------------------------
 
-        if (
-            request_queue.qsize()
-            >=
-            MAX_QUEUE_SIZE
-        ):
+        if request_queue.qsize() >= MAX_QUEUE_SIZE:
 
             return jsonify({
+
+                "success": False,
 
                 "error":
                     "Server is busy. Please try again later."
 
             }), 429
 
-
-        # ---------------------------------------------
-        # JSON
-        # ---------------------------------------------
+        # -----------------------------------------
+        # REQUEST JSON
+        # -----------------------------------------
 
         data = request.get_json(
             silent=True
         )
 
-
         if not data:
 
             return jsonify({
+
+                "success": False,
 
                 "error":
                     "Invalid JSON request."
 
             }), 400
 
+        # -----------------------------------------
+        # IMAGE
+        # -----------------------------------------
 
-        image_data = \
-            data.get(
-                "image"
-            )
-
+        image_data = data.get(
+            "image"
+        )
 
         if not image_data:
 
             return jsonify({
 
+                "success": False,
+
                 "error":
                     "No image provided."
 
             }), 400
-
 
         if not isinstance(
             image_data,
@@ -1042,85 +824,62 @@ def generate_3d():
 
             return jsonify({
 
+                "success": False,
+
                 "error":
                     "Invalid image data."
 
             }), 400
 
-
-        # ---------------------------------------------
+        # -----------------------------------------
         # TASK ID
-        # ---------------------------------------------
+        # -----------------------------------------
 
         task_id = (
-
             "task_"
-
-            +
-            str(
+            + str(
                 int(
-                    time.time()
-                    *
-                    1000
+                    time.time() * 1000
                 )
             )
-
-            +
-            "_"
-
-            +
-            uuid.uuid4().hex[:8]
-
+            + "_"
+            + uuid.uuid4().hex[:8]
         )
 
-
-        # ---------------------------------------------
+        # -----------------------------------------
         # SAVE IMAGE
-        # ---------------------------------------------
+        # -----------------------------------------
 
-        image_file = \
-            save_base64_image(
-                image_data,
-                task_id
-            )
+        image_file = save_base64_image(
+            image_data,
+            task_id
+        )
 
-
-        # ---------------------------------------------
+        # -----------------------------------------
         # QUEUE POSITION
-        # ---------------------------------------------
+        # -----------------------------------------
 
         queue_position = (
-            request_queue.qsize()
-            +
-            1
+            request_queue.qsize() + 1
         )
-
 
         estimated_wait = (
-            queue_position
-            *
-            180
+            queue_position * 180
         )
 
-
-        # ---------------------------------------------
+        # -----------------------------------------
         # SAVE TASK
-        # ---------------------------------------------
+        # -----------------------------------------
 
         with task_lock:
 
-            task_status[
-                task_id
-            ] = {
+            task_status[task_id] = {
 
-                "status":
-                    "pending",
+                "status": "pending",
 
                 "message":
-                    (
-                        "Your image has been "
-                        "added to the generation queue."
-                    ),
+                    "Your image has been added "
+                    "to the generation queue.",
 
                 "position":
                     queue_position,
@@ -1133,46 +892,52 @@ def generate_3d():
 
             }
 
-
-        # ---------------------------------------------
-        # QUEUE
-        # ---------------------------------------------
+        # -----------------------------------------
+        # ADD TO QUEUE
+        # -----------------------------------------
 
         request_queue.put(
-
             (
                 task_id,
                 image_file
             )
-
         )
 
-
         print(
-            "\nNEW TASK:",
-            task_id,
-            "POSITION:",
-            queue_position,
+            "\n" + "=" * 60,
             flush=True
         )
 
+        print(
+            f"NEW TASK: {task_id}",
+            flush=True
+        )
+
+        print(
+            f"QUEUE POSITION: {queue_position}",
+            flush=True
+        )
+
+        print(
+            "=" * 60,
+            flush=True
+        )
+
+        # -----------------------------------------
+        # RESPONSE
+        # -----------------------------------------
 
         return jsonify({
 
-            "success":
-                True,
+            "success": True,
 
-            "task_id":
-                task_id,
+            "task_id": task_id,
 
-            "status":
-                "pending",
+            "status": "pending",
 
             "message":
-                (
-                    "Your request has been "
-                    "added to the generation queue."
-                ),
+                "Your request has been "
+                "added to the generation queue.",
 
             "position":
                 queue_position,
@@ -1182,86 +947,71 @@ def generate_3d():
 
         })
 
-
-    except Exception as e:
+    except Exception as error:
 
         print(
-            "GENERATE ERROR:",
-            repr(e),
+            f"GENERATE ERROR: {error}",
             flush=True
         )
 
-
         return jsonify({
 
+            "success": False,
+
             "error":
-                str(e)
+                str(error)
 
         }), 500
 
 
 # =========================================================
-# STATUS
+# TASK STATUS
 # =========================================================
 
 @app.route(
     "/status/<task_id>",
     methods=["GET"]
 )
-def check_status(
-    task_id
-):
+def check_status(task_id):
 
-    status_info = \
-        get_task(
-            task_id
-        )
+    status_info = get_task(
+        task_id
+    )
 
+    # -----------------------------------------
+    # TASK NOT FOUND
+    # -----------------------------------------
 
-    if not status_info:
+    if status_info is None:
 
         return jsonify({
 
-            "status":
-                "failed",
+            "status": "failed",
 
             "error":
-                (
-                    "Task not found. "
-                    "The Render server may have restarted."
-                )
+                "Task not found. "
+                "The Render server may have restarted."
 
-        })
+        }), 200
 
-
-    # ---------------------------------------------
-    # UPDATE QUEUE POSITION
-    # ---------------------------------------------
+    # -----------------------------------------
+    # PENDING QUEUE POSITION
+    # -----------------------------------------
 
     if (
-        status_info.get(
-            "status"
-        )
-        ==
-        "pending"
+        status_info.get("status")
+        == "pending"
     ):
 
-        position = 1
-
+        pending_tasks = []
 
         with task_lock:
-
-            pending_tasks = []
-
 
             for tid, info in task_status.items():
 
                 if (
-                    info.get(
-                        "status"
-                    )
-                    ==
-                    "pending"
+                    info.get("status")
+                    == "pending"
                 ):
 
                     pending_tasks.append(
@@ -1274,9 +1024,11 @@ def check_status(
                         )
                     )
 
+        pending_tasks.sort(
+            key=lambda item: item[0]
+        )
 
-        pending_tasks.sort()
-
+        position = 1
 
         for index, item in enumerate(
             pending_tasks,
@@ -1289,11 +1041,11 @@ def check_status(
 
                 break
 
+        status_info["position"] = position
 
-        status_info[
-            "position"
-        ] = position
-
+    # -----------------------------------------
+    # RESPONSE
+    # -----------------------------------------
 
     return jsonify(
         status_info
@@ -1301,18 +1053,19 @@ def check_status(
 
 
 # =========================================================
-# DOWNLOAD
+# DOWNLOAD MODEL
 # =========================================================
 
 @app.route(
     "/download/<filename>",
     methods=["GET"]
 )
-def download_model(
-    filename
-):
+def download_model(filename):
 
-    # Security
+    # -----------------------------------------
+    # SECURITY
+    # -----------------------------------------
+
     if (
         "/" in filename
         or
@@ -1328,12 +1081,13 @@ def download_model(
 
         }), 400
 
+    # -----------------------------------------
+    # FILE
+    # -----------------------------------------
 
     file_path = (
-        MODEL_DIR /
-        filename
+        MODEL_DIR / filename
     )
-
 
     if not file_path.exists():
 
@@ -1344,6 +1098,9 @@ def download_model(
 
         }), 404
 
+    # -----------------------------------------
+    # DOWNLOAD
+    # -----------------------------------------
 
     return send_from_directory(
 
@@ -1357,10 +1114,10 @@ def download_model(
 
 
 # =========================================================
-# CLEANUP
+# CLEANUP OLD FILES
 # =========================================================
 
-def cleanup_old_models():
+def cleanup_old_files():
 
     while True:
 
@@ -1368,89 +1125,75 @@ def cleanup_old_models():
 
             now = time.time()
 
-
-            # -----------------------------------------
-            # MODELS
-            # -----------------------------------------
+            # -------------------------------------
+            # GENERATED MODELS
+            # -------------------------------------
 
             for file in MODEL_DIR.iterdir():
 
                 if not file.is_file():
-
                     continue
-
 
                 age = (
                     now -
                     file.stat().st_mtime
                 )
 
-
+                # Delete after 2 hours
                 if age > 7200:
 
                     try:
 
                         file.unlink()
 
-
                         print(
-                            "OLD MODEL DELETED:",
-                            file.name,
+                            f"OLD MODEL DELETED: "
+                            f"{file.name}",
                             flush=True
                         )
 
                     except Exception:
-
                         pass
 
-
-            # -----------------------------------------
+            # -------------------------------------
             # UPLOADS
-            # -----------------------------------------
+            # -------------------------------------
 
             for file in UPLOAD_DIR.iterdir():
 
                 if not file.is_file():
-
                     continue
-
 
                 age = (
                     now -
                     file.stat().st_mtime
                 )
 
-
+                # Delete after 1 hour
                 if age > 3600:
 
                     try:
 
                         file.unlink()
 
-
                         print(
-                            "OLD UPLOAD DELETED:",
-                            file.name,
+                            f"OLD UPLOAD DELETED: "
+                            f"{file.name}",
                             flush=True
                         )
 
                     except Exception:
-
                         pass
 
-
-        except Exception as e:
+        except Exception as error:
 
             print(
-                "CLEANUP ERROR:",
-                repr(e),
+                f"CLEANUP ERROR: {error}",
                 flush=True
             )
 
-
-        time.sleep(
-            1800
-        )
+        # Run every 30 minutes
+        time.sleep(1800)
 
 
 # =========================================================
@@ -1459,7 +1202,7 @@ def cleanup_old_models():
 
 cleanup_thread = threading.Thread(
 
-    target=cleanup_old_models,
+    target=cleanup_old_files,
 
     daemon=True,
 
@@ -1467,25 +1210,21 @@ cleanup_thread = threading.Thread(
 
 )
 
-
 cleanup_thread.start()
 
 
 # =========================================================
-# LOCAL
+# LOCAL DEVELOPMENT
 # =========================================================
 
 if __name__ == "__main__":
 
     port = int(
-
         os.environ.get(
             "PORT",
             5000
         )
-
     )
-
 
     app.run(
 
