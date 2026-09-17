@@ -22,21 +22,35 @@ task_status = {}
 
 
 def process_3d_conversion(image_data, task_id):
-    """Gradio Client দিয়ে ৩ডি মডেল জেনারেট করার প্রসেস"""
+    """Gradio Client দিয়ে Hunyuan3D-2 মডেল জেনারেট করার প্রসেস"""
     try:
-        # ⚠️ আপনার সঠিক Hugging Face Space ID এখানে লিখুন (e.g., "tencent/Hunyuan3D-2")
         space_id = "tencent/Hunyuan3D-2"
-        
+
         client = Client(space_id, hf_token=HF_TOKEN if HF_TOKEN else None)
 
-        # যদি image_data কোনো ফাইল পাথ হয়, তবে handle_file ব্যবহার হবে
-        image_input = handle_file(image_data) if isinstance(image_data, str) and os.path.exists(image_data) else image_data
+        # ইমেজ ইনপুট হ্যান্ডলিং
+        image_input = (
+            handle_file(image_data)
+            if isinstance(image_data, str) and os.path.exists(image_data)
+            else image_data
+        )
 
-        # Hunyuan3D-2 API Call
-        # দ্রষ্টব্য: আপনার Space-এর API Tab অনুযায়ী প্যারামিটার সামঞ্জস্য করে নিতে পারেন
+        # /shape_generation API কল
         result = client.predict(
+            caption=None,
             image=image_input,
-            api_name="/generation_all"  # অথবা আপনার Space-এর সঠিক api_name (যেমন /predict)
+            mv_image_front=None,
+            mv_image_back=None,
+            mv_image_left=None,
+            mv_image_right=None,
+            steps=30,
+            guidance_scale=5,
+            seed=1234,
+            octree_resolution=256,
+            check_box_rembg=True,
+            num_chunks=8000,
+            randomize_seed=True,
+            api_name="/shape_generation",
         )
 
         return {"success": True, "model_url": result}
