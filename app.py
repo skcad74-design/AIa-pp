@@ -4,7 +4,7 @@ import threading
 import time
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from gradio_client import Client
+from gradio_client import Client, handle_file
 
 app = Flask(__name__)
 CORS(app)
@@ -12,8 +12,8 @@ CORS(app)
 # -------------------------------------------------------------
 # ১. Gradio API Token Configuration
 # -------------------------------------------------------------
-# টোকেন সরাসরি কোডে না রেখে environment variable থেকে নেওয়া নিরাপদ
 HF_TOKEN = os.getenv("HF_TOKEN", "")
+
 # -------------------------------------------------------------
 # ২. Request Queue এবং Task Status Management
 # -------------------------------------------------------------
@@ -24,12 +24,20 @@ task_status = {}
 def process_3d_conversion(image_data, task_id):
     """Gradio Client দিয়ে ৩ডি মডেল জেনারেট করার প্রসেস"""
     try:
-        # Gradio Space-এর সাথে টোকেন দিয়ে কানেক্ট করুন
-        # "your-username/your-space-name" এর জায়গায় আপনার Space URL/ID দিন
-        client = Client("Hunyuan3D-2", hf_token=HF_TOKEN)
+        # ⚠️ আপনার সঠিক Hugging Face Space ID এখানে লিখুন (e.g., "tencent/Hunyuan3D-2")
+        space_id = "tencent/Hunyuan3D-2"
+        
+        client = Client(space_id, hf_token=HF_TOKEN if HF_TOKEN else None)
 
-        # Gradio Space-এর সঠিক api_name এবং ইনপুট অনুযায়ী কল করুন
-        result = client.predict(image=image_data, api_name="/predict")
+        # যদি image_data কোনো ফাইল পাথ হয়, তবে handle_file ব্যবহার হবে
+        image_input = handle_file(image_data) if isinstance(image_data, str) and os.path.exists(image_data) else image_data
+
+        # Hunyuan3D-2 API Call
+        # দ্রষ্টব্য: আপনার Space-এর API Tab অনুযায়ী প্যারামিটার সামঞ্জস্য করে নিতে পারেন
+        result = client.predict(
+            image=image_input,
+            api_name="/generation_all"  # অথবা আপনার Space-এর সঠিক api_name (যেমন /predict)
+        )
 
         return {"success": True, "model_url": result}
 
