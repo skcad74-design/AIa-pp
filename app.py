@@ -1,5 +1,4 @@
 import base64
-import io
 import os
 import queue
 import tempfile
@@ -10,7 +9,9 @@ from flask_cors import CORS
 from gradio_client import Client, handle_file
 
 app = Flask(__name__)
-CORS(app)
+
+# CORS সমস্যা সমাধানের জন্য সম্পূর্ণ ওপেন কনফিগারেশন
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 request_queue = queue.Queue()
@@ -18,7 +19,7 @@ task_status = {}
 
 
 def save_base64_to_temp_file(base64_string):
-    """Base64 ইমেজকে একটি টেম্পোরারি ফাইলে সেভ করে তার পাথ রিটার্ন করে"""
+    """Base64 ইমেজ থেকে টেম্পোরারি ফাইল তৈরি করে"""
     try:
         if "," in base64_string:
             base64_string = base64_string.split(",")[1]
@@ -34,13 +35,12 @@ def save_base64_to_temp_file(base64_string):
 
 
 def process_3d_conversion(image_data, task_id):
-    """Gradio Client দিয়ে Hunyuan3D-2 API কল"""
+    """Gradio Client দিয়ে 3D মডেল জেনারেট করে"""
     temp_file_path = None
     try:
         space_id = "tencent/Hunyuan3D-2"
         client = Client(space_id, hf_token=HF_TOKEN if HF_TOKEN else None)
 
-        # Base64 ইমেজ হলে ফাইল হিসেবে সেভ করা
         if isinstance(image_data, str) and (
             image_data.startswith("data:image") or len(image_data) > 500
         ):
@@ -68,7 +68,6 @@ def process_3d_conversion(image_data, task_id):
             api_name="/shape_generation",
         )
 
-        # কাজ শেষে টেম্পোরারি ফাইল ডিলিট করা
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
@@ -82,7 +81,7 @@ def process_3d_conversion(image_data, task_id):
 
 
 def worker_thread():
-    """ব্যাকগ্রাউন্ড টাস্ক এক্সিকিউটর"""
+    """ব্যাকগ্রাউন্ডে টাস্ক ফিল্টারিং ও প্রসেসিং"""
     while True:
         task_id, image_data = request_queue.get()
         task_status[task_id]["status"] = "processing"
@@ -130,7 +129,7 @@ def generate_3d():
     return jsonify(
         {
             "task_id": task_id,
-            "message": f"আপনার রিকোয়েস্ট লাইনে আছে। অনুগ্রহ করে অপেক্ষা করুন।",
+            "message": "আপনার রিকোয়েস্ট প্রক্রিয়াধীন রয়েছে।",
             "wait_time": estimated_wait_time,
         }
     )
@@ -139,8 +138,18 @@ def generate_3d():
 @app.route("/status/<task_id>", methods=["GET"])
 def check_status(task_id):
     status_info = task_status.get(task_id)
+
+    # ৪০৪ এরর এড়াতে টাস্ক না পাওয়া গেলেও ফ্রন্টএন্ডকে উপযুক্ত তথ্য জানানো
     if not status_info:
-        return jsonify({"error": "Invalid Task ID"}), 404
+        return (
+            jsonify(
+                {
+                    "status": "failed",
+                    "error": "Task not found or server restarted.",
+                }
+            ),
+            200,
+        )
 
     return jsonify(status_info)
 
